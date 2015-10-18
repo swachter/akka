@@ -21,12 +21,103 @@ import akka.serialization.BaseSerializer
 import akka.util.{ ByteString ⇒ AkkaByteString }
 import akka.protobuf.ByteString
 import akka.cluster.ddata.Key.KeyR
+import java.util.concurrent.atomic.AtomicInteger
+import scala.annotation.tailrec
+
+/**
+ * INTERNAL API
+ */
+private[akka] object ReplicatorMessageSerializer {
+
+  /**
+   * A cache that is designed for a small number (<= 32) of
+   * entries. It is using instance equality.
+   * Adding new entry overwrites oldest. It is
+   * thread safe but duplicates of same entry may occur.
+   */
+  class SmallCache[A <: AnyRef, B <: AnyRef](size: Int) {
+    require((size & (size - 1)) == 0, "size must be a power of 2")
+    require(size <= 32, "size must be <= 32")
+
+    private val n = new AtomicInteger(0)
+    private val mask = size - 1
+    private val elements = Array.ofDim[(A, B)](size)
+
+    /**
+     * Get value from cache or `null` if it doesn't exist.
+     */
+    def get(a: A): B = get(a, n.get)
+
+    private def get(a: A, startPos: Int): B = {
+      // start at the latest added value, most likely that we want that
+      val end = startPos + elements.length
+      @tailrec def find(i: Int): B = {
+        if (end - i == 0) null.asInstanceOf[B]
+        else {
+          val x = elements(i & mask)
+          if ((x eq null) || (x._1 ne a)) find(i + 1)
+          else x._2
+        }
+      }
+      find(startPos)
+    }
+
+    /**
+     * Add entry to the cache.
+     * Overwrites oldest entry.
+     */
+    def add(a: A, b: B): Unit = add((a, b))
+
+    def add(x: (A, B)): Unit = {
+      val i = n.incrementAndGet()
+      elements(i & mask) = x
+    }
+
+    /**
+     * Get value from cache or create new value and add
+     * it to the cache. Duplicates of same value may be added
+     * if multiple threads call this concurrently, but decent
+     * (low cost) effort is made to reduce the chance of duplicates.
+     */
+    def getOrAdd(a: A, b: () ⇒ B): B = {
+      val position = n.get
+      val c = get(a, position)
+      if (c ne null)
+        c
+      else {
+        val b2 = b()
+        if (position == n.get) {
+          // no change, add the new value
+          add(a, b2)
+          b2
+        } else {
+          // some other thread added, try one more time
+          // to reduce duplicates
+          val c2 = get(a)
+          if (c2 ne null) c2 // found it
+          else {
+            add(a, b2)
+            b2
+          }
+        }
+      }
+    }
+
+    override def toString: String =
+      elements.mkString("[", ",", "]")
+  }
+}
 
 /**
  * Protobuf serializer of ReplicatorMessage messages.
  */
 class ReplicatorMessageSerializer(val system: ExtendedActorSystem)
   extends SerializerWithStringManifest with SerializationSupport with BaseSerializer {
+  import ReplicatorMessageSerializer.SmallCache
+
+  private val readCache = new SmallCache[Read, Array[Byte]](4)
+  private val writeCache = new SmallCache[Write, Array[Byte]](4)
+  private val writeAckBytes = dm.Empty.getDefaultInstance.toByteArray
 
   val GetManifest = "A"
   val GetSuccessManifest = "B"
@@ -80,9 +171,9 @@ class ReplicatorMessageSerializer(val system: ExtendedActorSystem)
 
   def toBinary(obj: AnyRef): Array[Byte] = obj match {
     case m: DataEnvelope   ⇒ dataEnvelopeToProto(m).toByteArray
-    case m: Write          ⇒ writeToProto(m).toByteArray
-    case WriteAck          ⇒ dm.Empty.getDefaultInstance.toByteArray
-    case m: Read           ⇒ readToProto(m).toByteArray
+    case m: Write          ⇒ writeCache.getOrAdd(m, () ⇒ writeToProto(m).toByteArray)
+    case WriteAck          ⇒ writeAckBytes
+    case m: Read           ⇒ readCache.getOrAdd(m, () ⇒ readToProto(m).toByteArray)
     case m: ReadResult     ⇒ readResultToProto(m).toByteArray
     case m: Status         ⇒ statusToProto(m).toByteArray
     case m: Get[_]         ⇒ getToProto(m).toByteArray

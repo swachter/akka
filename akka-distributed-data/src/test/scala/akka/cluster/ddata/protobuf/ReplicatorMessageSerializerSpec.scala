@@ -78,4 +78,107 @@ class ReplicatorMessageSerializerSpec extends TestKit(ActorSystem("ReplicatorMes
     }
 
   }
+
+  "Cache" must {
+    import ReplicatorMessageSerializer._
+    "be power of 2" in {
+      intercept[IllegalArgumentException] {
+        new SmallCache[String, String](3)
+      }
+    }
+
+    "get added element" in {
+      val cache = new SmallCache[Read, String](2)
+      val a = Read("a")
+      cache.add(a, "A")
+      cache.get(a) should be("A")
+      val b = Read("b")
+      cache.add(b, "B")
+      cache.get(a) should be("A")
+      cache.get(b) should be("B")
+    }
+
+    "return null for non-existing elements" in {
+      val cache = new SmallCache[Read, String](4)
+      val a = Read("a")
+      cache.get(a) should be(null)
+      cache.add(a, "A")
+      val b = Read("b")
+      cache.get(b) should be(null)
+    }
+
+    "hold latest added elements" in {
+      val cache = new SmallCache[Read, String](4)
+      val a = Read("a")
+      val b = Read("b")
+      val c = Read("c")
+      val d = Read("d")
+      val e = Read("e")
+      cache.add(a, "A")
+      cache.get(a) should be("A")
+      cache.add(b, "B")
+      cache.get(a) should be("A")
+      cache.add(c, "C")
+      cache.get(a) should be("A")
+      cache.add(d, "D")
+      cache.get(a) should be("A")
+      // now it is full and a will be pushed out
+      cache.add(e, "E")
+      cache.get(a) should be(null)
+      cache.get(b) should be("B")
+      cache.get(c) should be("C")
+      cache.get(d) should be("D")
+      cache.get(e) should be("E")
+
+      cache.add(a, "A")
+      cache.get(a) should be("A")
+      cache.get(b) should be(null)
+      cache.get(c) should be("C")
+      cache.get(d) should be("D")
+      cache.get(e) should be("E")
+    }
+
+    "handle Int wrap around" ignore { // ignored because it takes 20 seconds (but it works)
+      val cache = new SmallCache[Read, String](2)
+      val a = Read("a")
+      val x = a -> "A"
+      var n = 0
+      while (n <= Int.MaxValue - 3) {
+        cache.add(x)
+        n += 1
+      }
+
+      cache.get(a) should be("A")
+
+      val b = Read("b")
+      val c = Read("c")
+      cache.add(b, "B")
+      cache.get(a) should be("A")
+      cache.get(b) should be("B")
+
+      cache.add(c, "C")
+      cache.get(a) should be(null)
+      cache.get(b) should be("B")
+      cache.get(c) should be("C")
+
+      cache.add(a, "A")
+      cache.get(a) should be("A")
+      cache.get(b) should be(null)
+      cache.get(c) should be("C")
+    }
+
+    "suppory getOrAdd" in {
+      val cache = new SmallCache[Read, AnyRef](4)
+      val a = Read("a")
+      val v1 = new AnyRef {
+        override def toString = "v1"
+      }
+      val v2 = new AnyRef {
+        override def toString = "v2"
+      }
+      cache.getOrAdd(a, () ⇒ v1) should be theSameInstanceAs v1
+      cache.getOrAdd(a, () ⇒ v2) should be theSameInstanceAs v1
+    }
+
+  }
 }
