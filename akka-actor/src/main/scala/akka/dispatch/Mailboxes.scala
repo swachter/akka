@@ -6,7 +6,6 @@ package akka.dispatch
 
 import java.lang.reflect.ParameterizedType
 import java.util.concurrent.ConcurrentHashMap
-
 import akka.ConfigurationException
 import akka.actor.{ Actor, ActorRef, ActorSystem, DeadLetter, Deploy, DynamicAccess, Props }
 import akka.dispatch.sysmsg.{ EarliestFirstSystemMessageList, LatestFirstSystemMessageList, SystemMessage, SystemMessageList }
@@ -14,8 +13,9 @@ import akka.event.EventStream
 import akka.event.Logging.Warning
 import akka.util.Reflect
 import com.typesafe.config.{ Config, ConfigFactory }
-
 import scala.util.control.NonFatal
+import java.util.concurrent.atomic.AtomicReference
+import scala.annotation.tailrec
 
 object Mailboxes {
   final val DefaultMailboxId = "akka.actor.default-mailbox"
@@ -231,5 +231,30 @@ private[akka] class Mailboxes(
     ConfigFactory.parseMap(Map("id" -> id).asJava)
       .withFallback(settings.config.getConfig(id))
       .withFallback(defaultMailboxConfig)
+  }
+
+  private var stashCapacityCache = new AtomicReference[Map[String, Int]](Map.empty[String, Int])
+
+  /**
+   * INTERNAL API: The capacity of the stash. Configured in the actor's mailbox or dispatcher config.
+   */
+  @tailrec private[akka] final def stashCapacity(dispatcher: String, mailbox: String): Int = {
+    val cache = stashCapacityCache.get
+    val key = dispatcher + "-" + mailbox
+    cache.get(key) match {
+      case Some(value) ⇒ value
+      case None ⇒
+        val disp = settings.config.getConfig(dispatcher)
+        val fallback = disp.withFallback(settings.config.getConfig(Mailboxes.DefaultMailboxId))
+        val config =
+          if (mailbox == Mailboxes.DefaultMailboxId) fallback
+          else settings.config.getConfig(mailbox).withFallback(fallback)
+        val value = config.getInt("stash-capacity")
+        if (stashCapacityCache.compareAndSet(cache, cache.updated(key, value)))
+          value
+        else
+          stashCapacity(dispatcher, mailbox) // recursive, try again
+    }
+
   }
 }
