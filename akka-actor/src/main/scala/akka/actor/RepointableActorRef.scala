@@ -185,6 +185,10 @@ private[akka] class UnstartedCell(val systemImpl: ActorSystemImpl,
   // use Envelope to keep on-send checks in the same place ACCESS MUST BE PROTECTED BY THE LOCK
   private[this] final val queue = new JLinkedList[Any]()
 
+  // performance optimization of sendSystemMessage
+  // it was introduced by issue #18613 e.g. creating a large router pool
+  private[this] var enqueuedNonSystemMsg = false
+
   import systemImpl.settings.UnstartedPushTimeout.{ duration ⇒ timeout }
 
   def replaceWith(cell: Cell): Unit = locked {
@@ -222,6 +226,8 @@ private[akka] class UnstartedCell(val systemImpl: ActorSystemImpl,
         if (cellIsReady(cell)) {
           cell.sendMessage(msg)
         } else if (!queue.offer(msg)) {
+          println(s"# enqueuedNonSystemMsg $msg") // FIXME
+          enqueuedNonSystemMsg = true
           system.eventStream.publish(Warning(self.path.toString, getClass, "dropping message of type " + msg.message.getClass + " due to enqueue failure"))
           system.deadLetters.tell(DeadLetter(msg.message, msg.sender, self), msg.sender)
         } else if (Mailbox.debug) println(s"$self temp queueing ${msg.message} from ${msg.sender}")
@@ -240,7 +246,7 @@ private[akka] class UnstartedCell(val systemImpl: ActorSystemImpl,
         cell.sendSystemMessage(msg)
       } else {
         // systemMessages that are sent during replace need to jump to just after the last system message in the queue, so it's processed before other messages
-        val wasEnqueued = if ((self.lookup ne this) && (self.underlying eq this) && !queue.isEmpty()) {
+        val wasEnqueued = if ((self.lookup ne this) && (self.underlying eq this) && !queue.isEmpty() && enqueuedNonSystemMsg) {
           @tailrec def tryEnqueue(i: JListIterator[Any] = queue.listIterator(), insertIntoIndex: Int = -1): Boolean =
             if (i.hasNext())
               tryEnqueue(i,
