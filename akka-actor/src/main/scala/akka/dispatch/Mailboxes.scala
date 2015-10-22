@@ -234,27 +234,36 @@ private[akka] class Mailboxes(
   }
 
   private var stashCapacityCache = new AtomicReference[Map[String, Int]](Map.empty[String, Int])
+  private val defaultStashCapacity: Int =
+    stashCapacityFromConfig(Dispatchers.DefaultDispatcherId, Mailboxes.DefaultMailboxId)
 
   /**
    * INTERNAL API: The capacity of the stash. Configured in the actor's mailbox or dispatcher config.
    */
   @tailrec private[akka] final def stashCapacity(dispatcher: String, mailbox: String): Int = {
-    val cache = stashCapacityCache.get
-    val key = dispatcher + "-" + mailbox
-    cache.get(key) match {
-      case Some(value) ⇒ value
-      case None ⇒
-        val disp = settings.config.getConfig(dispatcher)
-        val fallback = disp.withFallback(settings.config.getConfig(Mailboxes.DefaultMailboxId))
-        val config =
-          if (mailbox == Mailboxes.DefaultMailboxId) fallback
-          else settings.config.getConfig(mailbox).withFallback(fallback)
-        val value = config.getInt("stash-capacity")
-        if (stashCapacityCache.compareAndSet(cache, cache.updated(key, value)))
-          value
-        else
-          stashCapacity(dispatcher, mailbox) // recursive, try again
+    if (dispatcher == Dispatchers.DefaultDispatcherId && mailbox == Mailboxes.DefaultMailboxId)
+      defaultStashCapacity
+    else {
+      val cache = stashCapacityCache.get
+      val key = dispatcher + "-" + mailbox
+      cache.get(key) match {
+        case Some(value) ⇒ value
+        case None ⇒
+          val value = stashCapacityFromConfig(dispatcher, mailbox)
+          if (stashCapacityCache.compareAndSet(cache, cache.updated(key, value)))
+            value
+          else
+            stashCapacity(dispatcher, mailbox) // recursive, try again
+      }
     }
+  }
 
+  private def stashCapacityFromConfig(dispatcher: String, mailbox: String): Int = {
+    val disp = settings.config.getConfig(dispatcher)
+    val fallback = disp.withFallback(settings.config.getConfig(Mailboxes.DefaultMailboxId))
+    val config =
+      if (mailbox == Mailboxes.DefaultMailboxId) fallback
+      else settings.config.getConfig(mailbox).withFallback(fallback)
+    config.getInt("stash-capacity")
   }
 }

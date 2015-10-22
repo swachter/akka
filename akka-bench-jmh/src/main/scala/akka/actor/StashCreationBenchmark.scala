@@ -5,20 +5,25 @@ package akka.actor
 
 import scala.concurrent.Await
 import scala.concurrent.duration._
-
 import akka.testkit.TestActors
-import akka.testkit.TestProbe
 import org.openjdk.jmh.annotations._
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.CountDownLatch
+import com.typesafe.config.ConfigFactory
 
 object StashCreationBenchmark {
-  class StashingActor extends Actor with Stash {
+  class StashingActor(latch: CountDownLatch) extends Actor with Stash {
+
+    override def preStart(): Unit = {
+      latch.countDown()
+    }
+
     def receive = {
       case msg => sender() ! msg
     }
   }
 
-  val props = Props[StashingActor]
+  def props(latch: CountDownLatch) = Props(new StashingActor(latch))
 }
 
 @State(Scope.Benchmark)
@@ -27,10 +32,12 @@ object StashCreationBenchmark {
 @Warmup(iterations = 5)
 @Measurement(iterations = 10)
 class StashCreationBenchmark {
-  implicit val system: ActorSystem = ActorSystem()
-  val probe = TestProbe()
-
-  Props[TestActors.EchoActor]
+  val conf = ConfigFactory.parseString("""
+    my-dispatcher = {
+      stash-capacity = 1000
+    }
+    """)
+  implicit val system: ActorSystem = ActorSystem("StashCreationBenchmark", conf)
 
   @TearDown(Level.Trial)
   def shutdown() {
@@ -40,10 +47,19 @@ class StashCreationBenchmark {
 
   @Benchmark
   @OutputTimeUnit(TimeUnit.MICROSECONDS)
-  def testCreation: Boolean = {
-    val stash = system.actorOf(StashCreationBenchmark.props)
-    stash.tell("hello", probe.ref)
-    probe.expectMsg("hello")
+  def testDefault: Boolean = {
+    val latch = new CountDownLatch(1)
+    val stash = system.actorOf(StashCreationBenchmark.props(latch))
+    latch.await()
+    true
+  }
+
+  @Benchmark
+  @OutputTimeUnit(TimeUnit.MICROSECONDS)
+  def testCustom: Boolean = {
+    val latch = new CountDownLatch(1)
+    val stash = system.actorOf(StashCreationBenchmark.props(latch).withDispatcher("my-dispatcher"))
+    latch.await()
     true
   }
 }
