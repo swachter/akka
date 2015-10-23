@@ -240,7 +240,13 @@ private[akka] class Mailboxes(
   /**
    * INTERNAL API: The capacity of the stash. Configured in the actor's mailbox or dispatcher config.
    */
-  @tailrec private[akka] final def stashCapacity(dispatcher: String, mailbox: String): Int = {
+  private[akka] final def stashCapacity(dispatcher: String, mailbox: String): Int = {
+
+    @tailrec def updateCache(cache: Map[String, Int], key: String, value: Int): Unit = {
+      if (!stashCapacityCache.compareAndSet(cache, cache.updated(key, value)))
+        updateCache(stashCapacityCache.get, key, value) // recursive, try again
+    }
+
     if (dispatcher == Dispatchers.DefaultDispatcherId && mailbox == Mailboxes.DefaultMailboxId)
       defaultStashCapacity
     else {
@@ -250,10 +256,8 @@ private[akka] class Mailboxes(
         case Some(value) ⇒ value
         case None ⇒
           val value = stashCapacityFromConfig(dispatcher, mailbox)
-          if (stashCapacityCache.compareAndSet(cache, cache.updated(key, value)))
-            value
-          else
-            stashCapacity(dispatcher, mailbox) // recursive, try again
+          updateCache(cache, key, value)
+          value
       }
     }
   }
